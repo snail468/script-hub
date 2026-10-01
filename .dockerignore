@@ -1,0 +1,11 @@
+.git
+.github
+.wrangler
+.pnpm-store
+node_modules
+dist
+dist-server
+data
+*.log
+.env*
+README.md

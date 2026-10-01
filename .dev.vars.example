@@ -1,0 +1,2 @@
+# Copy to .dev.vars for `pnpm run cf:dev`.
+ADMIN_TOKEN=replace-with-a-long-random-token

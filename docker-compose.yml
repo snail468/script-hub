@@ -1,0 +1,24 @@
+services:
+  script-hub:
+    image: ${SCRIPT_HUB_IMAGE:-ghcr.io/snail468/script-hub:latest}
+    container_name: script-hub
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${SCRIPT_HUB_PORT:-3000}:3000"
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?请在 .env 中设置一个高强度 ADMIN_TOKEN}
+      IMPORT_HOSTS: ${IMPORT_HOSTS:-raw.githubusercontent.com,gist.githubusercontent.com,gitlab.com,bitbucket.org}
+      MAX_SCRIPT_BYTES: ${MAX_SCRIPT_BYTES:-262144}
+    volumes:
+      - script-hub-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  script-hub-data:
