@@ -8,6 +8,9 @@ const app = createApi({
   getStore: () => store,
   getConfig: () => ({
     adminToken: process.env.ADMIN_TOKEN,
+    adminUsername: process.env.ADMIN_USERNAME,
+    adminPassword: process.env.ADMIN_PASSWORD,
+    allowRegistration: process.env.ALLOW_REGISTRATION,
     importHosts: process.env.IMPORT_HOSTS,
     maxScriptBytes: process.env.MAX_SCRIPT_BYTES,
   }),

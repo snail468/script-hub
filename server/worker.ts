@@ -5,6 +5,9 @@ interface Bindings {
   DB: D1Database;
   ASSETS: Fetcher;
   ADMIN_TOKEN?: string;
+  ADMIN_USERNAME?: string;
+  ADMIN_PASSWORD?: string;
+  ALLOW_REGISTRATION?: string;
   IMPORT_HOSTS?: string;
   MAX_SCRIPT_BYTES?: string;
 }
@@ -25,6 +28,9 @@ const app = createApi({
     const env = context.env as Bindings;
     return {
       adminToken: env.ADMIN_TOKEN,
+      adminUsername: env.ADMIN_USERNAME,
+      adminPassword: env.ADMIN_PASSWORD,
+      allowRegistration: env.ALLOW_REGISTRATION,
       importHosts: env.IMPORT_HOSTS,
       maxScriptBytes: env.MAX_SCRIPT_BYTES,
     };

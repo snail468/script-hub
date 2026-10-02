@@ -7,7 +7,10 @@ services:
     ports:
       - "${SCRIPT_HUB_PORT:-3000}:3000"
     environment:
-      ADMIN_TOKEN: ${ADMIN_TOKEN:?请在 .env 中设置一个高强度 ADMIN_TOKEN}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置一个高强度 ADMIN_PASSWORD}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       IMPORT_HOSTS: ${IMPORT_HOSTS:-raw.githubusercontent.com,gist.githubusercontent.com,gitlab.com,bitbucket.org}
       MAX_SCRIPT_BYTES: ${MAX_SCRIPT_BYTES:-262144}
     volumes:

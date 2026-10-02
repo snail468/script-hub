@@ -6,10 +6,14 @@ import {
   Cloud,
   Code2,
   Download,
+  Eye,
+  EyeOff,
   ExternalLink,
   FileCode2,
-  KeyRound,
+  Folder,
   Link2,
+  LogIn,
+  LogOut,
   LoaderCircle,
   Menu,
   Pencil,
@@ -20,20 +24,23 @@ import {
   TerminalSquare,
   Trash2,
   Upload,
+  UserRound,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   type ApiMeta,
   type OperatingSystem,
   type ScriptInput,
   type ScriptRecord,
   type ScriptRuntime,
+  type SessionUser,
 } from "./types";
 
 const EMPTY_SCRIPT: ScriptInput = {
   title: "",
   description: "",
+  category: "未分类",
   os: "linux",
   runtime: "bash",
   sourceType: "editor",
@@ -59,19 +66,24 @@ const RUNTIME_LABELS: Record<ScriptRuntime, string> = {
 type ModalState =
   | { type: "editor"; script?: ScriptRecord; draft?: ScriptInput }
   | { type: "import" }
-  | { type: "token" }
+  | { type: "auth" }
+  | { type: "account" }
+  | { type: "delete"; script: ScriptRecord }
   | null;
 
 type Toast = { id: number; kind: "success" | "error"; message: string };
 
 export function App() {
   const [scripts, setScripts] = useState<ScriptRecord[]>([]);
-  const [meta, setMeta] = useState<ApiMeta>({ writeProtected: false, maxScriptBytes: 256 * 1024 });
+  const [meta, setMeta] = useState<ApiMeta>({ maxScriptBytes: 256 * 1024, registrationEnabled: true, currentUser: null });
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [os, setOs] = useState<OperatingSystem | "all">("all");
   const [runtime, setRuntime] = useState<ScriptRuntime | "all">("all");
+  const [category, setCategory] = useState("all");
+  const [scope, setScope] = useState<"all" | "mine">("all");
   const [modal, setModal] = useState<ModalState>(null);
+  const [authRequired, setAuthRequired] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -109,13 +121,22 @@ export function App() {
     return scripts.filter((script) => {
       const matchesQuery =
         !needle ||
-        [script.title, script.description, script.runtime, script.os, ...script.tags]
+        [script.title, script.description, script.category, script.runtime, script.os, ...script.tags]
           .join(" ")
           .toLocaleLowerCase("zh-CN")
           .includes(needle);
-      return matchesQuery && (os === "all" || script.os === os) && (runtime === "all" || script.runtime === runtime);
+      return matchesQuery
+        && (scope === "all" || script.owner?.id === meta.currentUser?.id)
+        && (category === "all" || script.category === category)
+        && (os === "all" || script.os === os)
+        && (runtime === "all" || script.runtime === runtime);
     });
-  }, [scripts, query, os, runtime]);
+  }, [scripts, query, category, os, runtime, scope, meta.currentUser?.id]);
+
+  const categories = useMemo(
+    () => [...new Set(scripts.map((script) => script.category || "未分类"))].sort((left, right) => left.localeCompare(right, "zh-CN")),
+    [scripts],
+  );
 
   const stats = useMemo(
     () => ({
@@ -130,11 +151,19 @@ export function App() {
     setToast({ id: Date.now(), kind, message });
   }
 
+  async function refreshData() {
+    const [scriptsResponse, metaResponse] = await Promise.all([
+      apiRequest<{ scripts: ScriptRecord[] }>("/api/scripts"),
+      apiRequest<ApiMeta>("/api/meta"),
+    ]);
+    setScripts(scriptsResponse.scripts);
+    setMeta(metaResponse);
+  }
+
   async function saveScript(input: ScriptInput, id?: string) {
     const result = await apiRequest<{ script: ScriptRecord }>(id ? `/api/scripts/${id}` : "/api/scripts", {
       method: id ? "PUT" : "POST",
       body: JSON.stringify(input),
-      auth: true,
     });
     setScripts((current) => [result.script, ...current.filter((script) => script.id !== result.script.id)]);
     setModal(null);
@@ -142,10 +171,10 @@ export function App() {
   }
 
   async function deleteScript(script: ScriptRecord) {
-    if (!window.confirm(`确定删除“${script.title}”吗？此操作不可撤销。`)) return;
     try {
-      await apiRequest(`/api/scripts/${script.id}`, { method: "DELETE", auth: true });
+      await apiRequest(`/api/scripts/${script.id}`, { method: "DELETE" });
       setScripts((current) => current.filter((item) => item.id !== script.id));
+      setModal(null);
       showToast("success", "脚本已删除");
     } catch (error) {
       handleMutationError(error);
@@ -157,7 +186,6 @@ export function App() {
       const result = await apiRequest<{ script: ScriptRecord }>("/api/import", {
         method: "POST",
         body: JSON.stringify({ url }),
-        auth: true,
       });
       setScripts((current) => [result.script, ...current]);
       setModal(null);
@@ -171,12 +199,21 @@ export function App() {
   function handleMutationError(error: unknown) {
     const message = getErrorMessage(error);
     showToast("error", message);
-    if (message.includes("令牌")) {
-      const token = window.prompt("请输入部署时配置的 ADMIN_TOKEN，保存后请再次提交：");
-      if (token?.trim()) {
-        sessionStorage.setItem("script-hub-token", token.trim());
-        showToast("success", "管理员令牌已保存，请再次提交");
-      }
+    if (error instanceof ApiRequestError && error.status === 401) {
+      setAuthRequired(true);
+    }
+  }
+
+  async function toggleVisibility(script: ScriptRecord) {
+    try {
+      const result = await apiRequest<{ script: ScriptRecord }>(`/api/scripts/${script.id}/visibility`, {
+        method: "PATCH",
+        body: JSON.stringify({ hidden: !script.hidden }),
+      });
+      setScripts((current) => current.map((item) => item.id === script.id ? result.script : item));
+      showToast("success", result.script.hidden ? "脚本已隐藏，仅管理员可见" : "脚本已公开");
+    } catch (error) {
+      handleMutationError(error);
     }
   }
 
@@ -196,6 +233,7 @@ export function App() {
           ...detected,
           title: file.name.replace(/\.[^.]+$/, ""),
           description: `上传自 ${file.name}`,
+          category: "上传脚本",
           sourceType: "upload",
           content,
           tags: ["上传"],
@@ -224,8 +262,9 @@ export function App() {
           </a>
         </nav>
         <div className="topbar-actions">
-          <button className="icon-button token-button" type="button" onClick={() => setModal({ type: "token" })} aria-label="设置管理员令牌" title="设置管理员令牌">
-            {meta.writeProtected ? <ShieldCheck size={18} /> : <KeyRound size={18} />}
+          <button className="account-button" type="button" onClick={() => setModal({ type: meta.currentUser ? "account" : "auth" })}>
+            {meta.currentUser ? <UserRound size={17} /> : <LogIn size={17} />}
+            <span>{meta.currentUser ? meta.currentUser.username : "登录 / 注册"}</span>
           </button>
           <button className="menu-button" type="button" onClick={() => setMobileNav((open) => !open)} aria-label="打开菜单">
             {mobileNav ? <X size={21} /> : <Menu size={21} />}
@@ -240,12 +279,16 @@ export function App() {
             <h1 id="hero-title">把常用脚本，<br /><span>放在伸手可及的地方。</span></h1>
             <p>收藏外部脚本、在线编辑或直接上传。需要时，一键复制运行命令，Linux 与 Windows 都照顾到。</p>
             <div className="hero-actions">
-              <button className="primary-button" type="button" onClick={() => setModal({ type: "editor" })}>
-                <Plus size={18} /> 新建脚本
-              </button>
-              <button className="secondary-button" type="button" onClick={() => setModal({ type: "import" })}>
-                <Link2 size={17} /> 收藏外部脚本
-              </button>
+              {meta.currentUser ? <>
+                <button className="primary-button" type="button" onClick={() => setModal({ type: "editor" })}>
+                  <Plus size={18} /> 新建脚本
+                </button>
+                <button className="secondary-button" type="button" onClick={() => setModal({ type: "import" })}>
+                  <Link2 size={17} /> 收藏外部脚本
+                </button>
+              </> : <button className="primary-button" type="button" onClick={() => setModal({ type: "auth" })}>
+                <LogIn size={18} /> 登录后管理脚本
+              </button>}
             </div>
           </div>
           <div className="hero-terminal" aria-label="运行命令示例">
@@ -280,7 +323,7 @@ export function App() {
               <h2 id="library-title">脚本库</h2>
               <p>搜索、筛选，然后复制命令。就这么简单。</p>
             </div>
-            <div className="library-actions">
+            {meta.currentUser && <div className="library-actions">
               <input
                 ref={fileInput}
                 type="file"
@@ -294,21 +337,27 @@ export function App() {
               <button className="primary-button compact" type="button" onClick={() => setModal({ type: "editor" })}>
                 <Plus size={17} /> 新建脚本
               </button>
-            </div>
+            </div>}
           </div>
 
           <div className="filter-bar">
             <label className="search-field">
               <Search size={18} />
-              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、标签或运行环境…" />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、分类、标签或运行环境…" />
               {query && <button type="button" onClick={() => setQuery("")} aria-label="清除搜索"><X size={15} /></button>}
             </label>
+            <FilterSelect label="分类" value={category} onChange={setCategory} options={[
+              ["all", "全部分类"], ...categories.map((item): [string, string] => [item, item]),
+            ]} />
             <FilterSelect label="系统" value={os} onChange={(value) => setOs(value as OperatingSystem | "all")} options={[
               ["all", "全部系统"], ["linux", "Linux"], ["windows", "Windows"], ["cross", "跨平台"],
             ]} />
             <FilterSelect label="环境" value={runtime} onChange={(value) => setRuntime(value as ScriptRuntime | "all")} options={[
               ["all", "全部环境"], ["bash", "Bash"], ["powershell", "PowerShell"], ["cmd", "CMD"], ["python", "Python"], ["other", "其他"],
             ]} />
+            {meta.currentUser && <FilterSelect label="空间" value={scope} onChange={(value) => setScope(value as "all" | "mine")} options={[
+              ["all", "全部公开"], ["mine", "我的空间"],
+            ]} />}
             <span className="result-count">{filteredScripts.length} 个结果</span>
           </div>
 
@@ -320,8 +369,10 @@ export function App() {
                 <ScriptCard
                   key={script.id}
                   script={script}
+                  currentUser={meta.currentUser}
                   onEdit={() => setModal({ type: "editor", script })}
-                  onDelete={() => void deleteScript(script)}
+                  onDelete={() => setModal({ type: "delete", script })}
+                  onToggleVisibility={() => void toggleVisibility(script)}
                   onToast={showToast}
                 />
               ))}
@@ -330,8 +381,8 @@ export function App() {
             <div className="empty-state">
               <FileCode2 size={32} />
               <h3>没有找到脚本</h3>
-              <p>换个关键词或清除筛选条件，也可以创建第一条脚本。</p>
-              <button className="primary-button compact" type="button" onClick={() => { setQuery(""); setOs("all"); setRuntime("all"); }}>
+              <p>换个关键词或清除筛选条件。</p>
+              <button className="primary-button compact" type="button" onClick={() => { setQuery(""); setCategory("all"); setOs("all"); setRuntime("all"); setScope("all"); }}>
                 清除筛选
               </button>
             </div>
@@ -376,11 +427,20 @@ export function App() {
         />
       )}
       {modal?.type === "import" && <ImportModal onClose={() => setModal(null)} onImport={importScript} />}
-      {modal?.type === "token" && (
-        <TokenModal
-          protectedMode={meta.writeProtected}
+      {modal?.type === "auth" && <AuthModal registrationEnabled={meta.registrationEnabled} onClose={() => setModal(null)} onAuthenticated={async () => { await refreshData(); setModal(null); showToast("success", "登录成功"); }} />}
+      {modal?.type === "account" && meta.currentUser && <AccountModal user={meta.currentUser} onClose={() => setModal(null)} onLogout={async () => { await apiRequest("/api/auth/logout", { method: "POST" }); await refreshData(); setScope("all"); setModal(null); showToast("success", "已退出登录"); }} />}
+      {modal?.type === "delete" && (
+        <DeleteModal
+          script={modal.script}
           onClose={() => setModal(null)}
-          onSaved={() => { setModal(null); showToast("success", "管理员令牌已保存在本次会话中"); }}
+          onConfirm={() => deleteScript(modal.script)}
+        />
+      )}
+      {authRequired && (
+        <AuthModal
+          registrationEnabled={meta.registrationEnabled}
+          onClose={() => setAuthRequired(false)}
+          onAuthenticated={async () => { await refreshData(); setAuthRequired(false); showToast("success", "登录成功，请再次提交刚才的操作"); }}
         />
       )}
       {toast && <div key={toast.id} className={`toast ${toast.kind}`} role="status">
@@ -402,11 +462,20 @@ function FilterSelect({ label, value, onChange, options }: { label: string; valu
   );
 }
 
-function ScriptCard({ script, onEdit, onDelete, onToast }: { script: ScriptRecord; onEdit: () => void; onDelete: () => void; onToast: (kind: Toast["kind"], message: string) => void }) {
+function ScriptCard({ script, currentUser, onEdit, onDelete, onToggleVisibility, onToast }: {
+  script: ScriptRecord;
+  currentUser: SessionUser | null;
+  onEdit: () => void;
+  onDelete: () => void;
+  onToggleVisibility: () => void;
+  onToast: (kind: Toast["kind"], message: string) => void;
+}) {
   const [copied, setCopied] = useState(false);
   const command = makeCommand(script);
+  const canManage = Boolean(currentUser && (currentUser.role === "admin" || currentUser.id === script.owner?.id));
 
   async function copyCommand() {
+    if (script.hidden) return;
     try {
       await copyText(command);
       setCopied(true);
@@ -418,36 +487,39 @@ function ScriptCard({ script, onEdit, onDelete, onToast }: { script: ScriptRecor
   }
 
   return (
-    <article className="script-card">
+    <article className={`script-card${script.hidden ? " is-hidden" : ""}`}>
       <div className="card-topline">
         <div className="badges">
+          <span className="category-badge"><Folder size={12} />{script.category || "未分类"}</span>
           <span className={`os-badge ${script.os}`}><span />{OS_LABELS[script.os]}</span>
           <span className="runtime-badge">{RUNTIME_LABELS[script.runtime]}</span>
+          {script.hidden && <span className="hidden-badge"><EyeOff size={12} />已隐藏</span>}
         </div>
-        <div className="card-menu">
+        {canManage && <div className="card-menu">
+          {currentUser?.role === "admin" && <button type="button" onClick={onToggleVisibility} aria-label={`${script.hidden ? "公开" : "隐藏"} ${script.title}`}>{script.hidden ? <Eye size={16} /> : <EyeOff size={16} />}</button>}
           <button type="button" onClick={onEdit} aria-label={`编辑 ${script.title}`}><Pencil size={16} /></button>
           <button type="button" className="danger" onClick={onDelete} aria-label={`删除 ${script.title}`}><Trash2 size={16} /></button>
-        </div>
+        </div>}
       </div>
-      <button className="card-title" type="button" onClick={onEdit}>
+      <div className="card-title">
         <span><Code2 size={20} /></span>
         <span><strong>{script.title}</strong><small>{script.description || "暂无简介"}</small></span>
-      </button>
+      </div>
       <pre className="code-preview"><code>{script.content.split("\n").slice(0, 5).join("\n")}</code></pre>
       <div className="tag-row">
         {script.tags.slice(0, 4).map((tag) => <span key={tag}>#{tag}</span>)}
-        {script.sourceUrl && <a href={script.sourceUrl} target="_blank" rel="noreferrer">来源 <ExternalLink size={12} /></a>}
+        {canManage && script.sourceUrl && <a href={script.sourceUrl} target="_blank" rel="noreferrer">来源 <ExternalLink size={12} /></a>}
       </div>
       <div className="command-box">
         <span className="command-prompt">›</span>
-        <code title={command}>{command}</code>
-        <button type="button" onClick={() => void copyCommand()} className={copied ? "copied" : ""} aria-label="复制运行命令">
+        <code title={script.hidden ? "脚本隐藏时，原文接口仅允许管理员浏览器会话访问" : command}>{script.hidden ? "隐藏脚本不提供公开运行命令" : command}</code>
+        <button type="button" disabled={script.hidden} onClick={() => void copyCommand()} className={copied ? "copied" : ""} aria-label="复制运行命令">
           {copied ? <Check size={16} /> : <Clipboard size={16} />}
         </button>
       </div>
       <div className="card-footer">
-        <span>更新于 {formatDate(script.updatedAt)}</span>
-        <a href={`/api/scripts/${script.id}/raw?download=1`} download><Download size={14} /> 下载</a>
+        <span>{script.owner ? `@${script.owner.username} · ` : "系统脚本 · "}更新于 {formatDate(script.updatedAt)}</span>
+        {canManage && <a href={`/api/scripts/${script.id}/raw?download=1`} download><Download size={14} /> 下载</a>}
       </div>
     </article>
   );
@@ -465,6 +537,7 @@ function EditorModal({ script, draft, maxBytes, onClose, onSave, onError }: {
   const [form, setForm] = useState<ScriptInput>({
     title: initial.title,
     description: initial.description,
+    category: initial.category,
     os: initial.os,
     runtime: initial.runtime,
     sourceType: initial.sourceType,
@@ -475,7 +548,6 @@ function EditorModal({ script, draft, maxBytes, onClose, onSave, onError }: {
   const [tags, setTags] = useState(initial.tags.join(", "));
   const [saving, setSaving] = useState(false);
   const bytes = new TextEncoder().encode(form.content).byteLength;
-  useEscape(onClose);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -493,10 +565,11 @@ function EditorModal({ script, draft, maxBytes, onClose, onSave, onError }: {
     <Modal title={script ? "编辑脚本" : draft ? "确认上传内容" : "新建脚本"} subtitle="内容会直接保存在你自己的数据库中" onClose={onClose} wide>
       <form className="editor-form" onSubmit={(event) => void submit(event)}>
         <div className="form-grid two-columns">
-          <label><span>脚本名称</span><input required maxLength={80} value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="例如：服务健康检查" /></label>
-          <label><span>标签 <small>使用逗号分隔</small></span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="运维, Docker, 日常" /></label>
+          <label><span>脚本名称</span><input autoFocus required maxLength={80} value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="例如：服务健康检查" /></label>
+          <label><span>分类</span><input required maxLength={30} value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} placeholder="例如：系统运维" /></label>
         </div>
         <label><span>简介</span><input maxLength={240} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="一句话说明脚本的用途和注意事项" /></label>
+        <label><span>标签 <small>使用逗号分隔，最多 8 个</small></span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="Docker, 日常, 诊断" /></label>
         <div className="form-grid two-columns">
           <label><span>适用系统</span><div className="select-control"><select value={form.os} onChange={(event) => setForm({ ...form, os: event.target.value as OperatingSystem })}><option value="linux">Linux</option><option value="windows">Windows</option><option value="cross">跨平台</option></select><ChevronDown size={15} /></div></label>
           <label><span>运行环境</span><div className="select-control"><select value={form.runtime} onChange={(event) => setForm({ ...form, runtime: event.target.value as ScriptRuntime })}><option value="bash">Bash</option><option value="powershell">PowerShell</option><option value="cmd">CMD</option><option value="python">Python</option><option value="other">其他</option></select><ChevronDown size={15} /></div></label>
@@ -518,7 +591,6 @@ function EditorModal({ script, draft, maxBytes, onClose, onSave, onError }: {
 function ImportModal({ onClose, onImport }: { onClose: () => void; onImport: (url: string) => Promise<void> }) {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
-  useEscape(onClose);
   async function submit(event: FormEvent) {
     event.preventDefault();
     setLoading(true);
@@ -535,43 +607,138 @@ function ImportModal({ onClose, onImport }: { onClose: () => void; onImport: (ur
   );
 }
 
-function TokenModal({ protectedMode, onClose, onSaved }: { protectedMode: boolean; onClose: () => void; onSaved: () => void }) {
-  const [token, setToken] = useState(() => sessionStorage.getItem("script-hub-token") ?? "");
-  useEscape(onClose);
-  function save(event: FormEvent) {
+function AuthModal({ registrationEnabled, onClose, onAuthenticated }: {
+  registrationEnabled: boolean;
+  onClose: () => void;
+  onAuthenticated: () => Promise<void>;
+}) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event: FormEvent) {
     event.preventDefault();
-    if (token.trim()) sessionStorage.setItem("script-hub-token", token.trim());
-    else sessionStorage.removeItem("script-hub-token");
-    onSaved();
+    setLoading(true);
+    setError("");
+    try {
+      await apiRequest(`/api/auth/${mode}`, {
+        method: "POST",
+        body: JSON.stringify({ username, password }),
+      });
+      await onAuthenticated();
+    } catch (requestError) {
+      setError(getErrorMessage(requestError));
+    } finally {
+      setLoading(false);
+    }
   }
+
   return (
-    <Modal title="管理员令牌" subtitle={protectedMode ? "服务器已开启写保护" : "服务器未配置令牌，当前允许匿名写入"} onClose={onClose}>
-      <form className="import-form" onSubmit={save}>
-        <label><span>ADMIN_TOKEN</span><div className="url-input"><KeyRound size={18} /><input type="password" autoFocus value={token} onChange={(event) => setToken(event.target.value)} placeholder="输入部署时设置的令牌" /></div></label>
-        <div className="info-panel"><ShieldCheck size={18} /><p>令牌只保存在当前浏览器会话中，关闭标签页后会清除，不会写入数据库。</p></div>
-        <div className="modal-actions"><span /><button className="secondary-button compact" type="button" onClick={() => { sessionStorage.removeItem("script-hub-token"); setToken(""); }}>清除</button><button className="primary-button compact" type="submit"><Check size={16} />保存</button></div>
+    <Modal title={mode === "login" ? "登录 Script Hub" : "创建账户"} subtitle={mode === "login" ? "登录后管理自己的脚本空间" : "新账户默认为普通用户，只能管理自己的脚本"} onClose={onClose}>
+      <form className="import-form auth-form" onSubmit={(event) => void submit(event)}>
+        <label><span>用户名</span><div className="url-input"><UserRound size={18} /><input autoFocus required minLength={3} maxLength={32} pattern="[A-Za-z0-9_-]+" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="3–32 位字母、数字、_ 或 -" /></div></label>
+        <label><span>密码</span><div className="url-input"><ShieldCheck size={18} /><input type="password" required minLength={mode === "register" ? 12 : undefined} maxLength={128} autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={mode === "register" ? "至少 12 个字符" : "输入密码"} /></div></label>
+        {error && <div className="form-error" role="alert"><CircleAlert size={16} />{error}</div>}
+        <div className="info-panel"><ShieldCheck size={18} /><p>登录状态通过安全 Cookie 保存 30 天；服务端数据库只保存密码哈希与会话摘要。</p></div>
+        <div className="modal-actions auth-actions">
+          {registrationEnabled ? <button className="text-button" type="button" onClick={() => { setMode((current) => current === "login" ? "register" : "login"); setError(""); }}>{mode === "login" ? "没有账户？注册" : "已有账户？登录"}</button> : <span />}
+          <button className="primary-button compact" disabled={loading} type="submit">{loading ? <LoaderCircle className="spin" size={16} /> : mode === "login" ? <LogIn size={16} /> : <Plus size={16} />}{mode === "login" ? "登录" : "注册并登录"}</button>
+        </div>
       </form>
     </Modal>
   );
 }
 
-function Modal({ title, subtitle, onClose, wide = false, children }: { title: string; subtitle: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) {
+function AccountModal({ user, onClose, onLogout }: { user: SessionUser; onClose: () => void; onLogout: () => Promise<void> }) {
+  const [loading, setLoading] = useState(false);
+  async function logout() {
+    setLoading(true);
+    try { await onLogout(); } finally { setLoading(false); }
+  }
+  return (
+    <Modal title={user.username} subtitle={user.role === "admin" ? "管理员 · 可管理全部用户空间与脚本可见性" : "普通用户 · 只能管理自己的脚本空间"} onClose={onClose}>
+      <div className="account-panel"><span className="account-avatar"><UserRound size={24} /></span><div><strong>@{user.username}</strong><p>{user.role === "admin" ? "管理员账户" : "普通用户"}</p></div></div>
+      <div className="confirm-actions"><button className="secondary-button compact" type="button" onClick={onClose}>关闭</button><button className="danger-button compact" disabled={loading} type="button" onClick={() => void logout()}>{loading ? <LoaderCircle className="spin" size={16} /> : <LogOut size={16} />}退出登录</button></div>
+    </Modal>
+  );
+}
+
+function DeleteModal({ script, onClose, onConfirm }: { script: ScriptRecord; onClose: () => void; onConfirm: () => Promise<void> }) {
+  const [deleting, setDeleting] = useState(false);
+
+  async function confirmDelete() {
+    setDeleting(true);
+    try {
+      await onConfirm();
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <Modal title="删除脚本" subtitle="此操作不可撤销" onClose={onClose} role="alertdialog">
+      <div className="confirm-content">
+        <div className="confirm-icon"><Trash2 size={22} /></div>
+        <div><strong>确定删除“{script.title}”吗？</strong><p>脚本正文、标签和分类信息都将从数据库中永久移除。</p></div>
+      </div>
+      <div className="confirm-actions">
+        <button className="secondary-button compact" type="button" onClick={onClose}>取消</button>
+        <button className="danger-button compact" disabled={deleting} type="button" onClick={() => void confirmDelete()}>{deleting ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}确认删除</button>
+      </div>
+    </Modal>
+  );
+}
+
+function Modal({ title, subtitle, onClose, wide = false, role = "dialog", children }: { title: string; subtitle: string; onClose: () => void; wide?: boolean; role?: "dialog" | "alertdialog"; children: React.ReactNode }) {
+  const titleId = useId();
+  const panelRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const frame = window.requestAnimationFrame(() => {
+      const preferredTarget = panelRef.current?.querySelector<HTMLElement>("[autofocus]");
+      const fallbackTarget = panelRef.current?.querySelector<HTMLElement>("button, input, select, textarea, [href]");
+      (preferredTarget ?? fallbackTarget ?? panelRef.current)?.focus();
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.body.style.overflow = previousOverflow;
+      previousFocus?.focus();
+    };
+  }, []);
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...(panelRef.current?.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href]") ?? [])];
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable.at(-1)!;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className={wide ? "modal wide" : "modal"} role="dialog" aria-modal="true" aria-labelledby="modal-title">
-        <header><div><h2 id="modal-title">{title}</h2><p>{subtitle}</p></div><button className="icon-button" type="button" onClick={onClose} aria-label="关闭"><X size={20} /></button></header>
+      <section ref={panelRef} tabIndex={-1} className={wide ? "modal wide" : "modal"} role={role} aria-modal="true" aria-labelledby={titleId} onKeyDown={handleKeyDown}>
+        <header><div><span className="modal-kicker">SCRIPT HUB</span><h2 id={titleId}>{title}</h2><p>{subtitle}</p></div><button className="icon-button modal-close" type="button" onClick={onClose} aria-label="关闭"><X size={19} /></button></header>
         {children}
       </section>
     </div>
   );
-}
-
-function useEscape(onClose: () => void) {
-  useEffect(() => {
-    const handle = (event: KeyboardEvent) => event.key === "Escape" && onClose();
-    window.addEventListener("keydown", handle);
-    return () => window.removeEventListener("keydown", handle);
-  }, [onClose]);
 }
 
 function makeCommand(script: ScriptRecord): string {
@@ -583,17 +750,19 @@ function makeCommand(script: ScriptRecord): string {
   return `curl -fsSLO '${rawUrl}?download=1'`;
 }
 
-async function apiRequest<T = unknown>(path: string, options: RequestInit & { auth?: boolean } = {}): Promise<T> {
+class ApiRequestError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+async function apiRequest<T = unknown>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   if (options.body) headers.set("Content-Type", "application/json");
-  if (options.auth) {
-    const token = sessionStorage.getItem("script-hub-token");
-    if (token) headers.set("Authorization", `Bearer ${token}`);
-  }
   const response = await fetch(path, { ...options, headers });
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: `请求失败 (${response.status})` })) as { error?: string };
-    throw new Error(body.error || `请求失败 (${response.status})`);
+    throw new ApiRequestError(response.status, body.error || `请求失败 (${response.status})`);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;

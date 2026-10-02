@@ -3,6 +3,14 @@ import { writeFileSync } from "node:fs";
 
 const databaseName = process.env.CLOUDFLARE_D1_NAME || "script-hub";
 const workerName = process.env.CLOUDFLARE_WORKER_NAME || "script-hub";
+const adminSecret = process.env.ADMIN_PASSWORD || process.env.ADMIN_TOKEN;
+
+if (!adminSecret) {
+  throw new Error("部署前必须设置 ADMIN_PASSWORD（ADMIN_TOKEN 仅作为旧配置兼容）");
+}
+if (adminSecret.length < 12 || adminSecret.length > 128) {
+  throw new Error("ADMIN_PASSWORD 长度须为 12–128 个字符");
+}
 
 if (!process.env.CLOUDFLARE_API_TOKEN) {
   console.log("未检测到 CLOUDFLARE_API_TOKEN，将使用 `wrangler login` 的本地登录状态。");
@@ -46,6 +54,8 @@ const generatedConfig = {
     },
   ],
   vars: {
+    ADMIN_USERNAME: process.env.ADMIN_USERNAME || "admin",
+    ALLOW_REGISTRATION: process.env.ALLOW_REGISTRATION || "true",
     IMPORT_HOSTS: process.env.IMPORT_HOSTS || "raw.githubusercontent.com,gist.githubusercontent.com,gitlab.com,bitbucket.org",
     MAX_SCRIPT_BYTES: process.env.MAX_SCRIPT_BYTES || "262144",
   },
@@ -59,10 +69,8 @@ runPnpm(["run", "build:web"]);
 runWrangler(["d1", "migrations", "apply", "DB", "--remote", "--config", configPath]);
 runWrangler(["deploy", "--config", configPath]);
 
-if (process.env.ADMIN_TOKEN) {
-  console.log("正在更新 ADMIN_TOKEN Secret…");
-  runWrangler(["secret", "put", "ADMIN_TOKEN", "--config", configPath], false, `${process.env.ADMIN_TOKEN}\n`);
-}
+console.log("正在更新 ADMIN_PASSWORD Secret…");
+runWrangler(["secret", "put", "ADMIN_PASSWORD", "--config", configPath], false, `${adminSecret}\n`);
 
 console.log(`部署完成。Worker：${workerName}，D1：${databaseName}`);
 

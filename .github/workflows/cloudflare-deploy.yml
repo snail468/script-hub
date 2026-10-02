@@ -55,6 +55,8 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD || secrets.ADMIN_TOKEN }}
+          ADMIN_USERNAME: ${{ vars.ADMIN_USERNAME || 'admin' }}
+          ALLOW_REGISTRATION: ${{ vars.ALLOW_REGISTRATION || 'true' }}
           CLOUDFLARE_WORKER_NAME: ${{ vars.CLOUDFLARE_WORKER_NAME || 'script-hub' }}
           CLOUDFLARE_D1_NAME: ${{ vars.CLOUDFLARE_D1_NAME || 'script-hub' }}

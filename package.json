@@ -21,7 +21,7 @@
     "build": "pnpm run build:web && pnpm run build:node",
     "start": "node dist-server/node.js",
     "check": "tsc --noEmit && eslint .",
-    "test": "esbuild server/api.ts --bundle --platform=node --target=node22 --format=esm --outfile=.test-dist/api.js && node --test tests/*.test.mjs",
+    "test": "esbuild server/api.ts --bundle --platform=node --target=node22 --format=esm --outfile=.test-dist/api.js && esbuild server/node-store.ts --bundle --platform=node --target=node22 --format=esm --outfile=.test-dist/node-store.js && node --test tests/*.test.mjs",
     "cf:dev": "pnpm run build:web && wrangler dev",
     "cf:deploy": "node scripts/deploy-cloudflare.mjs",
     "cf:migrate:local": "wrangler d1 migrations apply script-hub --local"

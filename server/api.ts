@@ -1,6 +1,7 @@
 import { bodyLimit } from "hono/body-limit";
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { secureHeaders } from "hono/secure-headers";
 import {
   OPERATING_SYSTEMS,
@@ -9,11 +10,23 @@ import {
   type OperatingSystem,
   type ScriptInput,
   type ScriptRuntime,
+  type SessionUser,
 } from "../src/types";
-import type { ScriptStore } from "./store";
+import {
+  createSessionToken,
+  hashPassword,
+  hashSessionToken,
+  SESSION_COOKIE,
+  SESSION_MAX_AGE_SECONDS,
+  verifyPassword,
+} from "./auth";
+import type { ScriptStore, UserRecord } from "./store";
 
 export interface RuntimeConfig {
   adminToken?: string;
+  adminUsername?: string;
+  adminPassword?: string;
+  allowRegistration?: string | boolean;
   importHosts?: string;
   maxScriptBytes?: string | number;
 }
@@ -33,7 +46,7 @@ const DEFAULT_IMPORT_HOSTS = [
 
 class ApiError extends Error {
   constructor(
-    readonly status: 400 | 401 | 404 | 413 | 415 | 422 | 502,
+    readonly status: 400 | 401 | 403 | 404 | 409 | 413 | 415 | 422 | 502,
     message: string,
   ) {
     super(message);
@@ -42,6 +55,24 @@ class ApiError extends Error {
 
 export function createApi(options: CreateApiOptions) {
   const app = new Hono();
+  const initializedStores = new WeakMap<ScriptStore, Promise<void>>();
+
+  async function getReadyStore(c: Context): Promise<ScriptStore> {
+    const store = await options.getStore(c);
+    let initialization = initializedStores.get(store);
+    if (!initialization) {
+      initialization = bootstrapAdmin(store, options.getConfig(c));
+      initializedStores.set(store, initialization);
+    }
+    await initialization;
+    return store;
+  }
+
+  async function currentUser(c: Context, store: ScriptStore): Promise<UserRecord | null> {
+    const token = getCookie(c, SESSION_COOKIE);
+    if (!token) return null;
+    return store.getUserBySession(await hashSessionToken(token), new Date().toISOString());
+  }
 
   app.use("*", secureHeaders({
     contentSecurityPolicy: {
@@ -57,35 +88,89 @@ export function createApi(options: CreateApiOptions) {
     referrerPolicy: "strict-origin-when-cross-origin",
   }));
   app.use("/api/*", bodyLimit({ maxSize: 2 * 1024 * 1024 }));
+  app.use("/api/*", async (c, next) => {
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(c.req.method)) {
+      const origin = c.req.header("origin");
+      if (origin && origin !== new URL(c.req.url).origin) throw new ApiError(403, "拒绝跨站请求");
+    }
+    await next();
+  });
 
   app.get("/api/health", (c) => c.json({ status: "ok", time: new Date().toISOString() }));
 
-  app.get("/api/meta", (c) => {
+  app.get("/api/meta", async (c) => {
     const config = options.getConfig(c);
+    const store = await getReadyStore(c);
     return c.json({
-      writeProtected: Boolean(config.adminToken?.trim()),
       maxScriptBytes: getMaxBytes(config),
+      registrationEnabled: registrationEnabled(config),
+      currentUser: toSessionUser(await currentUser(c, store)),
     });
+  });
+
+  app.post("/api/auth/register", async (c) => {
+    const config = options.getConfig(c);
+    if (!registrationEnabled(config)) throw new ApiError(403, "站点已关闭自助注册");
+    const body = await readJson(c);
+    const username = validateUsername(body.username);
+    const password = validatePassword(body.password);
+    const store = await getReadyStore(c);
+    if (await store.getUserByUsername(username)) throw new ApiError(409, "用户名已被使用");
+    let user: UserRecord;
+    try {
+      user = await store.createUser(username, await hashPassword(password));
+    } catch {
+      throw new ApiError(409, "用户名已被使用");
+    }
+    await createLoginSession(c, store, user);
+    return c.json({ user: toSessionUser(user) }, 201);
+  });
+
+  app.post("/api/auth/login", async (c) => {
+    const body = await readJson(c);
+    const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
+    const password = typeof body.password === "string" ? body.password : "";
+    const store = await getReadyStore(c);
+    const user = username ? await store.getUserByUsername(username) : null;
+    if (!user || !(await verifyPassword(password, user.passwordHash))) {
+      throw new ApiError(401, "用户名或密码错误");
+    }
+    await createLoginSession(c, store, user);
+    return c.json({ user: toSessionUser(user) });
+  });
+
+  app.post("/api/auth/logout", async (c) => {
+    const token = getCookie(c, SESSION_COOKIE);
+    if (token) {
+      const store = await getReadyStore(c);
+      await store.deleteSession(await hashSessionToken(token));
+    }
+    deleteCookie(c, SESSION_COOKIE, { path: "/", secure: isHttps(c), sameSite: "Lax" });
+    return c.body(null, 204);
   });
 
   app.get("/api/scripts", async (c) => {
     c.header("Cache-Control", "no-store");
-    const store = await options.getStore(c);
-    return c.json({ scripts: await store.list() });
+    const store = await getReadyStore(c);
+    const user = await currentUser(c, store);
+    const scripts = await store.list();
+    return c.json({ scripts: user?.role === "admin" ? scripts : scripts.filter((script) => !script.hidden) });
   });
 
   app.get("/api/scripts/:id", async (c) => {
     c.header("Cache-Control", "no-store");
-    const store = await options.getStore(c);
+    const store = await getReadyStore(c);
+    const user = await currentUser(c, store);
     const script = await store.get(c.req.param("id"));
-    if (!script) throw new ApiError(404, "脚本不存在");
+    if (!script || (script.hidden && user?.role !== "admin")) throw new ApiError(404, "脚本不存在");
     return c.json({ script });
   });
 
   app.get("/api/scripts/:id/raw", async (c) => {
-    const store = await options.getStore(c);
+    const store = await getReadyStore(c);
+    const user = await currentUser(c, store);
     const script = await store.get(c.req.param("id"));
-    if (!script) throw new ApiError(404, "脚本不存在");
+    if (!script || (script.hidden && user?.role !== "admin")) throw new ApiError(404, "脚本不存在");
     const filename = safeFilename(script.title, runtimeExtension(script.runtime));
     c.header("Content-Type", "text/plain; charset=utf-8");
     c.header("Cache-Control", "public, max-age=60");
@@ -97,33 +182,48 @@ export function createApi(options: CreateApiOptions) {
   });
 
   app.post("/api/scripts", async (c) => {
-    authorize(c, options.getConfig(c));
+    const store = await getReadyStore(c);
+    const user = await requireUser(c, store);
     const body = await readJson(c);
     const input = validateScriptInput(body, getMaxBytes(options.getConfig(c)));
-    const store = await options.getStore(c);
-    return c.json({ script: await store.create(input) }, 201);
+    return c.json({ script: await store.create(input, user.id) }, 201);
   });
 
   app.put("/api/scripts/:id", async (c) => {
-    authorize(c, options.getConfig(c));
+    const store = await getReadyStore(c);
+    const user = await requireUser(c, store);
+    const current = await store.get(c.req.param("id"));
+    requireScriptAccess(current, user);
     const body = await readJson(c);
     const input = validateScriptInput(body, getMaxBytes(options.getConfig(c)));
-    const store = await options.getStore(c);
     const script = await store.update(c.req.param("id"), input);
     if (!script) throw new ApiError(404, "脚本不存在");
     return c.json({ script });
   });
 
   app.delete("/api/scripts/:id", async (c) => {
-    authorize(c, options.getConfig(c));
-    const store = await options.getStore(c);
+    const store = await getReadyStore(c);
+    const user = await requireUser(c, store);
+    requireScriptAccess(await store.get(c.req.param("id")), user);
     if (!(await store.delete(c.req.param("id")))) throw new ApiError(404, "脚本不存在");
     return c.body(null, 204);
   });
 
+  app.patch("/api/scripts/:id/visibility", async (c) => {
+    const store = await getReadyStore(c);
+    const user = await requireUser(c, store);
+    if (user.role !== "admin") throw new ApiError(403, "仅管理员可以设置脚本可见性");
+    const body = await readJson(c);
+    if (typeof body.hidden !== "boolean") throw new ApiError(422, "hidden 必须是布尔值");
+    const script = await store.setHidden(c.req.param("id"), body.hidden);
+    if (!script) throw new ApiError(404, "脚本不存在");
+    return c.json({ script });
+  });
+
   app.post("/api/import", async (c) => {
     const config = options.getConfig(c);
-    authorize(c, config);
+    const store = await getReadyStore(c);
+    const user = await requireUser(c, store);
     const body = await readJson(c);
     const requestedUrl = typeof body.url === "string" ? body.url.trim() : "";
     if (!requestedUrl) throw new ApiError(422, "请输入脚本地址");
@@ -136,6 +236,7 @@ export function createApi(options: CreateApiOptions) {
       {
         title,
         description: `收藏自 ${new URL(requestedUrl).hostname} 的脚本快照。`,
+        category: "外部收藏",
         os: detected.os,
         runtime: detected.runtime,
         sourceType: "external",
@@ -145,8 +246,7 @@ export function createApi(options: CreateApiOptions) {
       },
       maxBytes,
     );
-    const store = await options.getStore(c);
-    return c.json({ script: await store.create(input) }, 201);
+    return c.json({ script: await store.create(input, user.id) }, 201);
   });
 
   app.onError((error, c) => {
@@ -182,6 +282,7 @@ async function readJson(c: Context): Promise<Record<string, unknown>> {
 function validateScriptInput(body: Record<string, unknown>, maxBytes: number): ScriptInput {
   const title = cleanText(body.title, 80, "标题");
   const description = cleanOptionalText(body.description, 240, "简介");
+  const category = cleanOptionalText(body.category, 30, "分类") || "未分类";
   const content = typeof body.content === "string" ? body.content.replace(/\r\n/g, "\n") : "";
   if (!content.trim()) throw new ApiError(422, "脚本内容不能为空");
   if (new TextEncoder().encode(content).byteLength > maxBytes) {
@@ -210,6 +311,7 @@ function validateScriptInput(body: Record<string, unknown>, maxBytes: number): S
   return {
     title,
     description,
+    category,
     os: body.os as OperatingSystem,
     runtime: body.runtime as ScriptRuntime,
     sourceType,
@@ -232,23 +334,74 @@ function cleanOptionalText(value: unknown, maxLength: number, label: string): st
   return result;
 }
 
-function authorize(c: Context, config: RuntimeConfig): void {
-  const expected = config.adminToken?.trim();
-  if (!expected) return;
-  const bearer = c.req.header("authorization")?.replace(/^Bearer\s+/i, "");
-  const supplied = bearer || c.req.header("x-admin-token") || "";
-  if (!constantTimeEqual(supplied, expected)) throw new ApiError(401, "管理员令牌无效或未提供");
+function validateUsername(value: unknown): string {
+  const username = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!/^[a-z0-9_-]{3,32}$/.test(username)) {
+    throw new ApiError(422, "用户名须为 3–32 位字母、数字、下划线或连字符");
+  }
+  return username;
 }
 
-function constantTimeEqual(a: string, b: string): boolean {
-  const left = new TextEncoder().encode(a);
-  const right = new TextEncoder().encode(b);
-  let difference = left.length ^ right.length;
-  const length = Math.max(left.length, right.length);
-  for (let index = 0; index < length; index += 1) {
-    difference |= (left[index] ?? 0) ^ (right[index] ?? 0);
+function validatePassword(value: unknown): string {
+  const password = typeof value === "string" ? value : "";
+  if (password.length < 12 || password.length > 128) {
+    throw new ApiError(422, "密码长度须为 12–128 个字符");
   }
-  return difference === 0;
+  return password;
+}
+
+function registrationEnabled(config: RuntimeConfig): boolean {
+  if (typeof config.allowRegistration === "boolean") return config.allowRegistration;
+  return !["false", "0", "no", "off"].includes(config.allowRegistration?.trim().toLowerCase() ?? "true");
+}
+
+async function bootstrapAdmin(store: ScriptStore, config: RuntimeConfig): Promise<void> {
+  const password = config.adminPassword?.trim() || config.adminToken?.trim();
+  if (!password) return;
+  if (password.length < 12 || password.length > 128) {
+    throw new Error("ADMIN_PASSWORD 长度须为 12–128 个字符");
+  }
+  const username = validateUsername(config.adminUsername?.trim() || "admin");
+  const current = await store.getUserByUsername(username);
+  if (current?.role === "admin" && await verifyPassword(password, current.passwordHash)) return;
+  await store.upsertAdmin(username, await hashPassword(password));
+}
+
+async function requireUser(c: Context, store: ScriptStore): Promise<UserRecord> {
+  const token = getCookie(c, SESSION_COOKIE);
+  if (!token) throw new ApiError(401, "请先登录账户");
+  const user = await store.getUserBySession(await hashSessionToken(token), new Date().toISOString());
+  if (!user) throw new ApiError(401, "登录已失效，请重新登录");
+  return user;
+}
+
+function requireScriptAccess(script: Awaited<ReturnType<ScriptStore["get"]>>, user: UserRecord): void {
+  if (!script) throw new ApiError(404, "脚本不存在");
+  if (user.role !== "admin" && script.owner?.id !== user.id) {
+    throw new ApiError(403, "只能管理自己用户空间内的脚本");
+  }
+}
+
+async function createLoginSession(c: Context, store: ScriptStore, user: UserRecord): Promise<void> {
+  const token = createSessionToken();
+  const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000).toISOString();
+  await store.createSession(await hashSessionToken(token), user.id, expiresAt);
+  setCookie(c, SESSION_COOKIE, token, {
+    path: "/",
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: isHttps(c),
+    maxAge: SESSION_MAX_AGE_SECONDS,
+  });
+}
+
+function isHttps(c: Context): boolean {
+  return new URL(c.req.url).protocol === "https:"
+    || c.req.header("x-forwarded-proto")?.split(",", 1)[0]?.trim().toLowerCase() === "https";
+}
+
+function toSessionUser(user: UserRecord | null): SessionUser | null {
+  return user ? { id: user.id, username: user.username, role: user.role } : null;
 }
 
 function getMaxBytes(config: RuntimeConfig): number {

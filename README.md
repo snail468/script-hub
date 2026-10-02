@@ -19,19 +19,23 @@
 ## 功能
 
 - Linux、Windows、跨平台脚本分类
+- 自定义业务分类、分类筛选与多标签检索
 - Bash、PowerShell、CMD、Python 等运行环境筛选
 - 在线创建、编辑、删除与下载脚本
 - 上传 `.sh`、`.ps1`、`.cmd`、`.bat`、`.py`、`.txt` 文件
 - 从 GitHub、Gist、GitLab、Bitbucket 收藏外部脚本快照
 - 一键复制 Bash / PowerShell / CMD / Python 运行命令
-- 搜索、标签、响应式界面与键盘可访问弹窗
-- 可选 `ADMIN_TOKEN` 写保护
+- 搜索、分类、标签、响应式界面与键盘可访问弹窗
+- 管理员账户与普通用户自助注册，脚本按用户空间隔离管理
+- 游客可浏览和复制命令，但不显示编辑、删除、上传等管理操作
+- 管理员可管理所有用户空间，并可隐藏脚本（仅管理员可见）
+- 30 天 `HttpOnly` 会话、PBKDF2-SHA256 密码哈希与服务端会话摘要
 - 服务端限制上传体积、导入域名、跳转次数与抓取超时
 - GitHub Actions 自动构建 `linux/amd64`、`linux/arm64` GHCR 镜像
 - GitHub Actions / 本地命令一键创建 D1、迁移并发布 Workers
 
 > [!WARNING]
-> 一键命令会执行脚本。运行前务必查看脚本内容；公网部署必须设置高强度 `ADMIN_TOKEN`。
+> 一键命令会执行脚本。运行前务必查看脚本内容；公网部署必须设置高强度 `ADMIN_PASSWORD` 并启用 HTTPS。
 
 ## 本地开发
 
@@ -84,14 +88,16 @@ ghcr.io/snail468/script-hub:latest
 cp .env.example .env
 ```
 
-编辑 `.env`，至少修改以下两项：
+编辑 `.env`，至少修改以下三项：
 
 ```dotenv
 SCRIPT_HUB_IMAGE=ghcr.io/snail468/script-hub:latest
-ADMIN_TOKEN=<至少 32 字节的随机字符串>
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=<至少 16 位的高强度密码>
+ALLOW_REGISTRATION=true
 ```
 
-可以生成随机令牌：
+可以生成随机管理员密码：
 
 ```bash
 openssl rand -hex 32
@@ -120,7 +126,9 @@ docker run -d \
   --name script-hub \
   --restart unless-stopped \
   -p 3000:3000 \
-  -e ADMIN_TOKEN="$(openssl rand -hex 32)" \
+  -e ADMIN_USERNAME=admin \
+  -e ADMIN_PASSWORD="$(openssl rand -hex 32)" \
+  -e ALLOW_REGISTRATION=true \
   -v script-hub-data:/data \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,size=16m \
@@ -159,7 +167,7 @@ Workers 使用 D1 保存脚本，不需要 R2。部署脚本会自动：
 2. 生成不提交到 Git 的临时 Wrangler 配置；
 3. 应用 `migrations/` 中尚未执行的迁移；
 4. 构建前端并部署 Worker；
-5. 如提供 `ADMIN_TOKEN`，将其写入 Cloudflare Secret。
+5. 将 `ADMIN_PASSWORD` 写入 Cloudflare Secret，并设置管理员用户名与注册开关。
 
 ### 方式一：GitHub Actions
 
@@ -169,7 +177,9 @@ Fork 后，在仓库 `Settings → Secrets and variables → Actions` 中添加�
 | --- | --- | --- |
 | Secret | `CLOUDFLARE_API_TOKEN` | Cloudflare API Token |
 | Secret | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare Account ID |
-| Secret | `ADMIN_TOKEN` | 管理员写入令牌 |
+| Secret | `ADMIN_PASSWORD` | 管理员登录密码，建议至少 16 位 |
+| Variable（可选） | `ADMIN_USERNAME` | 管理员用户名，默认 `admin` |
+| Variable（可选） | `ALLOW_REGISTRATION` | 是否允许自助注册，默认 `true` |
 | Variable（可选） | `CLOUDFLARE_WORKER_NAME` | 默认 `script-hub` |
 | Variable（可选） | `CLOUDFLARE_D1_NAME` | 默认 `script-hub` |
 
@@ -188,7 +198,9 @@ pnpm exec wrangler login
 ```bash
 export CLOUDFLARE_ACCOUNT_ID="你的账号 ID"
 export CLOUDFLARE_API_TOKEN="你的 API Token"
-export ADMIN_TOKEN="$(openssl rand -hex 32)"
+export ADMIN_USERNAME="admin"
+export ADMIN_PASSWORD="$(openssl rand -hex 32)"
+export ALLOW_REGISTRATION="true"
 pnpm run cf:deploy
 ```
 
@@ -197,7 +209,13 @@ PowerShell：
 ```powershell
 $env:CLOUDFLARE_ACCOUNT_ID = "你的账号 ID"
 $env:CLOUDFLARE_API_TOKEN = "你的 API Token"
-$env:ADMIN_TOKEN = -join ((48..57) + (97..102) | Get-Random -Count 64 | ForEach-Object {[char]$_})
+$bytes = New-Object byte[] 32
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($bytes)
+$rng.Dispose()
+$env:ADMIN_USERNAME = "admin"
+$env:ADMIN_PASSWORD = -join ($bytes | ForEach-Object { $_.ToString("x2") })
+$env:ALLOW_REGISTRATION = "true"
 pnpm run cf:deploy
 ```
 
@@ -220,7 +238,10 @@ Cloudflare 配置依据官方的 [Workers 静态资源 SPA 路由](https://devel
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `ADMIN_TOKEN` | 空 | 写操作令牌；生产必须设置 |
+| `ADMIN_USERNAME` | `admin` | 由部署配置维护的管理员用户名 |
+| `ADMIN_PASSWORD` | 空 | 管理员密码；Docker 与 Workers 部署必须设置 |
+| `ALLOW_REGISTRATION` | `true` | 是否开放普通用户自助注册 |
+| `ADMIN_TOKEN` | 空 | 旧版本兼容；`ADMIN_PASSWORD` 为空时作为管理员密码使用 |
 | `DB_PATH` | `./data/script-hub.db` | Docker / Node SQLite 路径 |
 | `PORT` | `8787`（容器为 `3000`） | Node 服务端口 |
 | `HOST` | `127.0.0.1`（容器为 `0.0.0.0`） | Node 监听地址 |
@@ -228,6 +249,7 @@ Cloudflare 配置依据官方的 [Workers 静态资源 SPA 路由](https://devel
 | `IMPORT_HOSTS` | 常用代码托管域名 | 允许服务端抓取的 HTTPS 域名，逗号分隔 |
 
 不要在生产环境把 `IMPORT_HOSTS` 设置为 `*`，否则会扩大服务端请求伪造（SSRF）风险。
+若站点公开在互联网且不需要开放注册，请设置 `ALLOW_REGISTRATION=false`；需要开放注册时，建议在反向代理或 Cloudflare 中为 `/api/auth/*` 配置速率限制。
 
 ## 目录结构
 
@@ -248,7 +270,7 @@ scripts/                自动部署脚本
 当前版本适合个人或小团队自托管。按价值和风险排序，建议后续这样演进：
 
 1. **先加版本历史与回滚**：每次保存时记录内容版本、修改人和校验值，避免误改生产脚本。
-2. **再做团队权限**：接入 OIDC / Cloudflare Access，区分只读、编辑、管理员，替代共享令牌。
+2. **增强团队登录**：在现有用户空间之上接入 OIDC / Cloudflare Access，并增加账户停用、密码修改与会话管理。
 3. **增加安全扫描**：保存前接入 ShellCheck、PSScriptAnalyzer；危险命令只提示，不自动执行。
 4. **加审计与签名**：记录导入来源、SHA-256、执行命令复制事件；发布脚本可增加签名验证。
 5. **完善导入适配**：支持 GitHub 仓库目录同步、定时检查上游变更，但更新必须人工确认。
@@ -257,7 +279,10 @@ scripts/                自动部署脚本
 ## 安全说明
 
 - 脚本展示使用纯文本，不执行用户提交的 HTML。
-- 写接口使用 Bearer Token；令牌只保存在浏览器 `sessionStorage`。
+- 写接口要求登录；会话令牌只放在 `HttpOnly`、`SameSite=Lax` Cookie 中，数据库仅保存 SHA-256 摘要。
+- 密码使用带随机盐的 PBKDF2-SHA256（210,000 次迭代）保存，不存储明文；登录错误不区分用户名或密码。
+- 普通用户只能修改自己的脚本；旧版本遗留脚本归为系统脚本，仅管理员可管理。
+- 隐藏脚本对非管理员的列表、详情和原文下载接口均不可见。
 - 外部收藏只允许 HTTPS，逐次校验重定向域名，并限制 10 秒与文件大小。
 - Docker 使用非 root 用户、只读根文件系统、移除 Linux capabilities。
 - Cloudflare Secret 和 GitHub Secret 不应写入仓库、镜像或 Wrangler 明文变量。

@@ -1,2 +1,4 @@
 # Copy to .dev.vars for `pnpm run cf:dev`.
-ADMIN_TOKEN=replace-with-a-long-random-token
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=replace-with-a-strong-password
+ALLOW_REGISTRATION=true
