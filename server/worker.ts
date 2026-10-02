@@ -10,7 +10,6 @@ interface Bindings {
   ALLOW_REGISTRATION?: string;
   IMPORT_HOSTS?: string;
   MAX_SCRIPT_BYTES?: string;
-  DEBUG_ERRORS?: string;
 }
 
 const stores = new WeakMap<D1Database, D1ScriptStore>();
@@ -34,7 +33,6 @@ const app = createApi({
       allowRegistration: env.ALLOW_REGISTRATION,
       importHosts: env.IMPORT_HOSTS,
       maxScriptBytes: env.MAX_SCRIPT_BYTES,
-      debugErrors: env.DEBUG_ERRORS,
     };
   },
 });

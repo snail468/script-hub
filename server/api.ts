@@ -29,7 +29,6 @@ export interface RuntimeConfig {
   allowRegistration?: string | boolean;
   importHosts?: string;
   maxScriptBytes?: string | number;
-  debugErrors?: string | boolean;
 }
 
 interface CreateApiOptions {
@@ -51,6 +50,12 @@ class ApiError extends Error {
     message: string,
   ) {
     super(message);
+  }
+}
+
+class ServiceInitializationError extends Error {
+  constructor(readonly code: string) {
+    super("服务初始化失败");
   }
 }
 
@@ -252,14 +257,12 @@ export function createApi(options: CreateApiOptions) {
 
   app.onError((error, c) => {
     if (error instanceof ApiError) return c.json({ error: error.message }, error.status);
+    if (error instanceof ServiceInitializationError) {
+      console.error(error);
+      return c.json({ error: "服务初始化失败", code: error.code }, 500);
+    }
     if (error.name === "BodyLimitError") return c.json({ error: "请求内容过大" }, 413);
     console.error(error);
-    if (debugErrorsEnabled(options.getConfig(c))) {
-      return c.json({
-        error: "服务器处理请求时发生错误",
-        detail: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-      }, 500);
-    }
     return c.json({ error: "服务器处理请求时发生错误" }, 500);
   });
 
@@ -270,11 +273,6 @@ export function createApi(options: CreateApiOptions) {
   );
 
   return app;
-}
-
-function debugErrorsEnabled(config: RuntimeConfig): boolean {
-  if (typeof config.debugErrors === "boolean") return config.debugErrors;
-  return ["true", "1", "yes", "on"].includes(config.debugErrors?.trim().toLowerCase() ?? "false");
 }
 
 async function readJson(c: Context): Promise<Record<string, unknown>> {
@@ -371,12 +369,32 @@ async function bootstrapAdmin(store: ScriptStore, config: RuntimeConfig): Promis
   const password = config.adminPassword?.trim() || config.adminToken?.trim();
   if (!password) return;
   if (password.length < 12 || password.length > 128) {
-    throw new Error("ADMIN_PASSWORD 长度须为 12–128 个字符");
+    throw new ServiceInitializationError("ADMIN_PASSWORD_INVALID");
   }
-  const username = validateUsername(config.adminUsername?.trim() || "admin");
-  const current = await store.getUserByUsername(username);
+  let username: string;
+  try {
+    username = validateUsername(config.adminUsername?.trim() || "admin");
+  } catch {
+    throw new ServiceInitializationError("ADMIN_USERNAME_INVALID");
+  }
+  let current: UserRecord | null;
+  try {
+    current = await store.getUserByUsername(username);
+  } catch {
+    throw new ServiceInitializationError("ADMIN_LOOKUP_FAILED");
+  }
   if (current?.role === "admin" && await verifyPassword(password, current.passwordHash)) return;
-  await store.upsertAdmin(username, await hashPassword(password));
+  let passwordHash: string;
+  try {
+    passwordHash = await hashPassword(password);
+  } catch {
+    throw new ServiceInitializationError("ADMIN_HASH_FAILED");
+  }
+  try {
+    await store.upsertAdmin(username, passwordHash);
+  } catch {
+    throw new ServiceInitializationError("ADMIN_UPSERT_FAILED");
+  }
 }
 
 async function requireUser(c: Context, store: ScriptStore): Promise<UserRecord> {
