@@ -58,6 +58,7 @@ const generatedConfig = {
     ALLOW_REGISTRATION: process.env.ALLOW_REGISTRATION || "true",
     IMPORT_HOSTS: process.env.IMPORT_HOSTS || "raw.githubusercontent.com,gist.githubusercontent.com,gitlab.com,bitbucket.org",
     MAX_SCRIPT_BYTES: process.env.MAX_SCRIPT_BYTES || "262144",
+    DEBUG_ERRORS: process.env.DEBUG_ERRORS || "false",
   },
   observability: { enabled: true },
 };

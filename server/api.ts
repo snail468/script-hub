@@ -29,6 +29,7 @@ export interface RuntimeConfig {
   allowRegistration?: string | boolean;
   importHosts?: string;
   maxScriptBytes?: string | number;
+  debugErrors?: string | boolean;
 }
 
 interface CreateApiOptions {
@@ -253,6 +254,12 @@ export function createApi(options: CreateApiOptions) {
     if (error instanceof ApiError) return c.json({ error: error.message }, error.status);
     if (error.name === "BodyLimitError") return c.json({ error: "请求内容过大" }, 413);
     console.error(error);
+    if (debugErrorsEnabled(options.getConfig(c))) {
+      return c.json({
+        error: "服务器处理请求时发生错误",
+        detail: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      }, 500);
+    }
     return c.json({ error: "服务器处理请求时发生错误" }, 500);
   });
 
@@ -263,6 +270,11 @@ export function createApi(options: CreateApiOptions) {
   );
 
   return app;
+}
+
+function debugErrorsEnabled(config: RuntimeConfig): boolean {
+  if (typeof config.debugErrors === "boolean") return config.debugErrors;
+  return ["true", "1", "yes", "on"].includes(config.debugErrors?.trim().toLowerCase() ?? "false");
 }
 
 async function readJson(c: Context): Promise<Record<string, unknown>> {

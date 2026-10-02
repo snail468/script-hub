@@ -58,5 +58,6 @@ jobs:
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD || secrets.ADMIN_TOKEN }}
           ADMIN_USERNAME: ${{ vars.ADMIN_USERNAME || 'admin' }}
           ALLOW_REGISTRATION: ${{ vars.ALLOW_REGISTRATION || 'true' }}
+          DEBUG_ERRORS: ${{ vars.DEBUG_ERRORS || 'false' }}
           CLOUDFLARE_WORKER_NAME: ${{ vars.CLOUDFLARE_WORKER_NAME || 'script-hub' }}
           CLOUDFLARE_D1_NAME: ${{ vars.CLOUDFLARE_D1_NAME || 'script-hub' }}
