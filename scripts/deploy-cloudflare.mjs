@@ -1,15 +1,19 @@
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 
 const databaseName = process.env.CLOUDFLARE_D1_NAME || "script-hub";
 const workerName = process.env.CLOUDFLARE_WORKER_NAME || "script-hub";
 const adminSecret = process.env.ADMIN_PASSWORD || process.env.ADMIN_TOKEN;
+const adminUsername = process.env.ADMIN_USERNAME || "admin";
 
 if (!adminSecret) {
   throw new Error("部署前必须设置 ADMIN_PASSWORD（ADMIN_TOKEN 仅作为旧配置兼容）");
 }
 if (adminSecret.length < 12 || adminSecret.length > 128) {
   throw new Error("ADMIN_PASSWORD 长度须为 12–128 个字符");
+}
+if (adminSecret !== adminSecret.trim()) {
+  throw new Error("ADMIN_PASSWORD 不能包含首尾空格或换行");
 }
 
 if (!process.env.CLOUDFLARE_API_TOKEN) {
@@ -54,25 +58,78 @@ const generatedConfig = {
     },
   ],
   vars: {
-    ADMIN_USERNAME: process.env.ADMIN_USERNAME || "admin",
+    ADMIN_USERNAME: adminUsername,
     ALLOW_REGISTRATION: process.env.ALLOW_REGISTRATION || "true",
     IMPORT_HOSTS: process.env.IMPORT_HOSTS || "raw.githubusercontent.com,gist.githubusercontent.com,gitlab.com,bitbucket.org",
     MAX_SCRIPT_BYTES: process.env.MAX_SCRIPT_BYTES || "262144",
   },
   observability: { enabled: true },
+  secrets: { required: ["ADMIN_PASSWORD"] },
 };
 
 const configPath = ".wrangler.generated.json";
+const secretsPath = ".wrangler.secrets.json";
 writeFileSync(configPath, `${JSON.stringify(generatedConfig, null, 2)}\n`, { mode: 0o600 });
+writeFileSync(secretsPath, `${JSON.stringify({ ADMIN_PASSWORD: adminSecret })}\n`, { mode: 0o600 });
 
-runPnpm(["run", "build:web"]);
-runWrangler(["d1", "migrations", "apply", "DB", "--remote", "--config", configPath]);
-runWrangler(["deploy", "--config", configPath]);
+try {
+  runPnpm(["run", "build:web"]);
+  runWrangler(["d1", "migrations", "apply", "DB", "--remote", "--config", configPath]);
+  const deployOutput = runWrangler([
+    "deploy",
+    "--config",
+    configPath,
+    "--secrets-file",
+    secretsPath,
+  ], true);
+  process.stdout.write(deployOutput);
 
-console.log("正在更新 ADMIN_PASSWORD Secret…");
-runWrangler(["secret", "put", "ADMIN_PASSWORD", "--config", configPath], false, `${adminSecret}\n`);
+  const workerUrl = process.env.CLOUDFLARE_WORKER_URL
+    || deployOutput.match(/https:\/\/[^\s]+\.workers\.dev/)?.[0];
+  if (!workerUrl) {
+    throw new Error("无法识别 Worker 地址；请设置 CLOUDFLARE_WORKER_URL 后重试");
+  }
 
-console.log(`部署完成。Worker：${workerName}，D1：${databaseName}`);
+  await verifyAdminLogin(workerUrl, adminUsername, adminSecret);
+  console.log(`部署及管理员登录自检完成。Worker：${workerName}，D1：${databaseName}`);
+} finally {
+  rmSync(configPath, { force: true });
+  rmSync(secretsPath, { force: true });
+}
+
+async function verifyAdminLogin(workerUrl, username, password) {
+  const loginUrl = new URL("/api/auth/login", workerUrl);
+  let lastStatus = 0;
+  for (let attempt = 1; attempt <= 8; attempt += 1) {
+    try {
+      const response = await fetch(loginUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      lastStatus = response.status;
+      if (response.ok) {
+        const cookie = response.headers.get("set-cookie")?.split(";", 1)[0];
+        if (cookie) {
+          await fetch(new URL("/api/auth/logout", workerUrl), {
+            method: "POST",
+            headers: { cookie },
+          }).catch(() => undefined);
+        }
+        console.log("管理员登录自检通过。");
+        return;
+      }
+    } catch {
+      lastStatus = 0;
+    }
+    if (attempt < 8) await delay(1_500);
+  }
+  throw new Error(`管理员登录自检失败（HTTP ${lastStatus || "network"}）；请检查 ADMIN_USERNAME 与 ADMIN_PASSWORD`);
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
 
 function runWrangler(args, capture = false, input) {
   return runPnpm(["exec", "wrangler", ...args], capture, input);
@@ -93,7 +150,7 @@ function runPnpm(args, capture = false, input) {
   });
   if (result.status !== 0) {
     if (capture) process.stderr.write(result.stderr || result.stdout || "命令执行失败\n");
-    process.exit(result.status || 1);
+    throw new Error(`命令执行失败（退出码 ${result.status || 1}）`);
   }
   return capture ? `${result.stdout || ""}${result.stderr || ""}` : "";
 }

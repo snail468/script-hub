@@ -43,6 +43,7 @@ next-env.d.ts
 /.test-dist/
 /.wrangler/
 /.wrangler.generated.json
+/.wrangler.secrets.json
 /.pnpm-store/
 /data/
 /.dev.*.log
