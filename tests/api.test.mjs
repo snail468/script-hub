@@ -130,4 +130,18 @@ describe("Script Hub API accounts and permissions", () => {
     const oversized = await app.fetch(jsonRequest("/api/scripts", { ...validScript, content: "x".repeat(1025) }, cookie));
     assert.equal(oversized.status, 413);
   });
+
+  it("uses the runtime-specific PBKDF2 iteration count", async () => {
+    const store = new MemoryStore();
+    const app = createApi({
+      getStore: () => store,
+      getConfig: () => ({ passwordIterations: 100_000 }),
+    });
+    const response = await app.fetch(jsonRequest("/api/auth/register", {
+      username: "worker-user",
+      password: "worker-password-123",
+    }));
+    assert.equal(response.status, 201);
+    assert.match(store.users[0].passwordHash, /^pbkdf2_sha256\$100000\$/);
+  });
 });

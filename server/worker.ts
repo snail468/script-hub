@@ -33,6 +33,8 @@ const app = createApi({
       allowRegistration: env.ALLOW_REGISTRATION,
       importHosts: env.IMPORT_HOSTS,
       maxScriptBytes: env.MAX_SCRIPT_BYTES,
+      // Cloudflare Workers production currently rejects PBKDF2 counts above 100,000.
+      passwordIterations: 100_000,
     };
   },
 });

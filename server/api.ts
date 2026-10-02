@@ -29,6 +29,7 @@ export interface RuntimeConfig {
   allowRegistration?: string | boolean;
   importHosts?: string;
   maxScriptBytes?: string | number;
+  passwordIterations?: string | number;
 }
 
 interface CreateApiOptions {
@@ -124,7 +125,7 @@ export function createApi(options: CreateApiOptions) {
     if (await store.getUserByUsername(username)) throw new ApiError(409, "用户名已被使用");
     let user: UserRecord;
     try {
-      user = await store.createUser(username, await hashPassword(password));
+      user = await store.createUser(username, await hashPassword(password, getPasswordIterations(config)));
     } catch {
       throw new ApiError(409, "用户名已被使用");
     }
@@ -386,7 +387,7 @@ async function bootstrapAdmin(store: ScriptStore, config: RuntimeConfig): Promis
   if (current?.role === "admin" && await verifyPassword(password, current.passwordHash)) return;
   let passwordHash: string;
   try {
-    passwordHash = await hashPassword(password);
+    passwordHash = await hashPassword(password, getPasswordIterations(config));
   } catch {
     throw new ServiceInitializationError("ADMIN_HASH_FAILED");
   }
@@ -439,6 +440,11 @@ function getMaxBytes(config: RuntimeConfig): number {
   return Number.isFinite(parsed) && parsed >= 1024
     ? Math.min(Math.floor(parsed), 1024 * 1024)
     : DEFAULT_MAX_SCRIPT_BYTES;
+}
+
+function getPasswordIterations(config: RuntimeConfig): number {
+  const parsed = Number(config.passwordIterations ?? 210_000);
+  return Number.isInteger(parsed) && parsed >= 100_000 && parsed <= 1_000_000 ? parsed : 210_000;
 }
 
 function allowedImportHosts(config: RuntimeConfig): Set<string> {

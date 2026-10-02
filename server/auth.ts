@@ -1,20 +1,28 @@
-const PASSWORD_ITERATIONS = 210_000;
+const DEFAULT_PASSWORD_ITERATIONS = 210_000;
+const MIN_PASSWORD_ITERATIONS = 100_000;
+const MAX_PASSWORD_ITERATIONS = 1_000_000;
 const PASSWORD_BYTES = 32;
 
 export const SESSION_COOKIE = "script_hub_session";
 export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 
-export async function hashPassword(password: string): Promise<string> {
+export async function hashPassword(
+  password: string,
+  iterations = DEFAULT_PASSWORD_ITERATIONS,
+): Promise<string> {
+  if (!Number.isInteger(iterations) || iterations < MIN_PASSWORD_ITERATIONS || iterations > MAX_PASSWORD_ITERATIONS) {
+    throw new Error("invalid password iterations");
+  }
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const hash = await derivePassword(password, salt, PASSWORD_ITERATIONS);
-  return `pbkdf2_sha256$${PASSWORD_ITERATIONS}$${toHex(salt)}$${toHex(hash)}`;
+  const hash = await derivePassword(password, salt, iterations);
+  return `pbkdf2_sha256$${iterations}$${toHex(salt)}$${toHex(hash)}`;
 }
 
 export async function verifyPassword(password: string, encoded: string): Promise<boolean> {
   const [algorithm, rawIterations, rawSalt, rawHash] = encoded.split("$");
   if (algorithm !== "pbkdf2_sha256" || !rawIterations || !rawSalt || !rawHash) return false;
   const iterations = Number(rawIterations);
-  if (!Number.isInteger(iterations) || iterations < 100_000 || iterations > 1_000_000) return false;
+  if (!Number.isInteger(iterations) || iterations < MIN_PASSWORD_ITERATIONS || iterations > MAX_PASSWORD_ITERATIONS) return false;
   try {
     const expected = fromHex(rawHash);
     const actual = await derivePassword(password, fromHex(rawSalt), iterations, expected.byteLength);
