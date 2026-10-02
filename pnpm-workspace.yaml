@@ -1,2 +1,9 @@
 minimumReleaseAgeExclude:
   - '@cloudflare/workers-types@4.20260702.1'
+
+# pnpm 11 blocks dependency lifecycle scripts unless they are explicitly
+# trusted. These packages require install scripts for their native binaries.
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true
