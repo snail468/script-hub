@@ -1,4 +1,4 @@
-name: Deploy to Cloudflare Workers
+name: Validate and deploy to Cloudflare Workers
 
 on:
   workflow_dispatch:
@@ -12,6 +12,8 @@ on:
       - "wrangler.jsonc"
       - "package.json"
       - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/cloudflare-deploy.yml"
 
 permissions:
   contents: read
@@ -21,9 +23,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  validate-and-deploy:
     runs-on: ubuntu-latest
-    environment: production
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -49,6 +50,7 @@ jobs:
         run: pnpm run check && pnpm test
 
       - name: Create D1, migrate and deploy
+        if: github.event_name == 'workflow_dispatch'
         run: pnpm run cf:deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

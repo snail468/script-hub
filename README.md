@@ -173,7 +173,7 @@ Fork 后，在仓库 `Settings → Secrets and variables → Actions` 中添加�
 | Variable（可选） | `CLOUDFLARE_WORKER_NAME` | 默认 `script-hub` |
 | Variable（可选） | `CLOUDFLARE_D1_NAME` | 默认 `script-hub` |
 
-API Token 至少需要 Workers Scripts 与 D1 的编辑权限。随后打开 `Actions → Deploy to Cloudflare Workers → Run workflow`。推送到 `main` 时也会自动发布。
+API Token 至少需要 Workers Scripts 与 D1 的编辑权限。随后打开 `Actions → Validate and deploy to Cloudflare Workers → Run workflow` 完成一键发布。推送相关代码到 `main` 时只执行校验，不会在未确认的情况下改动生产环境。
 
 ### 方式二：本地 CLI
 
